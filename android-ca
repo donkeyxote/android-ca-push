@@ -1,0 +1,141 @@
+#!/bin/bash
+
+TMPDIR="/tmp/android-ca-push"
+CERTPATH=$TMPDIR/cert
+HASHPATH=$TMPDIR/hash
+
+
+yell() { echo "$0: $*" >&2; }
+die() { yell "$*"; exit 1; }
+try() { "$@" || die "cannot $*"; }
+
+
+update_cert()
+{
+  try rm -rf $CERTPATH
+  try mkdir -m 700 -p $CERTPATH
+  echo "Downloading certificates..."
+  LIST=$(try sed --regexp-extended '/(^#.*$)|(^\s*$)/d' cert_list.conf)
+  IDX=0
+  for URL in $LIST
+  do
+    ((IDX = $IDX + 1))
+    echo "certificate for $URL will be $IDX.crt"
+    try wget --quiet -O $CERTPATH/$IDX.crt $URL
+    if [ "$(file -b $CERTPATH/$IDX.crt)" != "PEM certificate" ]
+    then
+      echo "$URL is not a valid PEM certificate: skipping..."
+      try rm $CERTPATH/$IDX.crt
+      ((IDX = $IDX - 1))
+    fi
+  done
+}
+
+
+update_hash()
+{
+  try rm -rf $HASHPATH
+  try mkdir -m 700 -p $HASHPATH
+  echo "Create Android compatible certificate files..."
+  for CERT in $(try ls $CERTPATH)
+  do
+    if [ "$(file -b $CERTPATH/$CERT)" == "PEM certificate" ]
+    then
+      echo -n "Calculating hash for $CERT..."
+      HASH=$(try openssl x509 -inform PEM -subject_hash_old -in $CERTPATH/$CERT | head -1)
+      echo " $HASH"
+      try cat $CERTPATH/$CERT > $HASHPATH/$HASH.0
+    else
+      echo "$CERTPATH/$CERT is not a valid PEM certificate: skipping..."
+      try rm $CERTPATH/$CERT
+    fi
+  done
+}
+
+
+push()
+{
+  echo "Killing old server..."
+  try adb kill-server
+  echo
+
+  echo "Starting adb daemon with root permissions..."
+  try adb root
+  echo
+
+  echo "Checking device state..."
+  state=$(adb get-state 2>/dev/null)
+  if [[ ( -z $state ) || ( $state != "device" ) ]]
+  then
+  	echo "Your device is not properly connected"
+  	exit 1
+  fi
+  echo
+
+  echo "Remounting /system read-write..."
+  try adb remount
+  echo
+
+
+  echo "Pushing file to device..."
+  for HASH in $(find $HASHPATH -type f -regex '.*\.0')
+  do
+    if [ "$(file -b $HASH)" == "PEM certificate" ]
+    then
+      echo "Pushing $HASH..."
+      try chmod 644 $HASH
+      try adb push $HASH /system/etc/security/cacerts/
+    else
+      echo "$HASH is not a valid PEM certificate: skipping..."
+      try rm $HASH
+    fi
+  done
+}
+
+
+install()
+{
+  update_cert
+  echo
+  update_hash
+  echo
+  push
+  echo
+  clean
+  echo "done."
+}
+
+
+clean()
+{
+  echo "Removing $TMPDIR..."
+  try rm -rf $TMPDIR
+}
+
+
+help()
+{
+  echo "usage: ca-flash [ install | update | hash | push | clean | help ]"
+}
+
+
+if [ $# -eq 1 ]
+then
+  case "$1" in
+    install) install;;
+    update) update_cert;;
+    hash) update_hash;;
+    push) push;;
+    clean) clean;;
+    help) help;;
+    *) echo "Unknown command: $1"; help; exit 1;;
+  esac
+elif [ $# -eq 0 ]
+then
+  help
+  exit 0
+else
+  echo "Too many arguments"
+  help
+  exit 1
+fi
